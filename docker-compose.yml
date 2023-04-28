@@ -1,0 +1,15 @@
+version: "3.4"
+
+services:
+  postgresql:
+    image: postgres:15.2
+    container_name: postgres_service_test_db
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: 1234567
+      POSTGRES_USER: admin
+      POSTGRES_DB: go_service_2
+      PGDATA: /data
+      POSTGRES_INITDB_ARGS: "-A md5"
+    ports:
+      - "54320:5432"

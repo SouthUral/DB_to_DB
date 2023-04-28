@@ -59,6 +59,9 @@ class Postgres(pg_context):
         self.counter_partiton = self.Saver.get_counter_partiton()
         return len(self.data_for_partition) == self.counter_partiton
 
+    def __call__(self):
+        self._worker()
+
 
 class PostgresExtrator():
     '''Класс для взаимодействия с БД откуда считываются данные'''
@@ -182,8 +185,6 @@ class PostgresSaver():
             )
         return self.cursor.fetchone()
 
-
-
 class PgConfig:
     def __init__(self, dbname: str, user: str, password: str, host: str, port: str):
         self.dbname = os.getenv(dbname)
@@ -196,3 +197,6 @@ class PgConfig:
         return self.__dict__
 
 
+if __name__ == '__main__':
+    Postgres(ext_pg_conf=PgConfig('DBNAME_1', 'USER_1', 'PASSWORD_1', 'HOST_1', 'PORT_1')
+    , save_pg_conf=PgConfig('DBNAME_2', 'USER_2', 'PASSWORD_2', 'HOST_2', 'PORT_2'))
