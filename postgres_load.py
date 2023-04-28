@@ -1,5 +1,6 @@
 import os
 import json
+import datetime
 import psycopg2
 from dotenv import load_dotenv
 from psycopg2.extensions import connection as _connection
@@ -7,6 +8,14 @@ from psycopg2.extras import DictCursor, execute_values
 from contextlib import contextmanager
 from log_pack import log_error, log_success
 
+
+class JsonEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, (datetime.date, datetime.datetime, datetime.time)):
+            return o.isoformat()
+        if isinstance(o, datetime.timedelta):
+            return o.total_seconds()
+        return json.JSONEncoder.default(self, o)
 
 class pg_context:
     @staticmethod
@@ -26,10 +35,10 @@ class pg_context:
 
 class Postgres(pg_context):
     count_partition: int
-    Saver: PostgresSaver
-    Extractor: PostgresExtrator
+    # Saver: PostgresSaver
+    # Extractor: PostgresExtrator
 
-    def __init__(self, ext_pg_conf: PgConfig, save_pg_conf: PgConfig, chunk_extract=500, chunk_save=100):
+    def __init__(self, ext_pg_conf, save_pg_conf, chunk_extract=500, chunk_save=100):
         self.ext_pg_conf = ext_pg_conf
         self.save_pg_conf = save_pg_conf
         self.chunk_extract = chunk_extract
@@ -41,7 +50,7 @@ class Postgres(pg_context):
             self.Saver = PostgresSaver(save_conn, self.chunk_save)
             self.Extractor = PostgresExtrator(ext_conn, self.chunk_extract)
             # Запуск блока проверки
-            if not self._check_db_partitions() and self.count_partition == 0:
+            if not self._check_db_partitions() and self.counter_partiton == 0:
                 self.Saver.make_partition(self.data_for_partition)
                 if self.Saver.get_counter_partiton() == 0:
                     # если после этих действий секции не создались то вызывается исключение
@@ -49,8 +58,8 @@ class Postgres(pg_context):
                     raise SystemExit
 
             self.Extractor.check_id = self.Saver.chek_created_id()
-            for data in Extractor.generator():
-                Saver.data_recorder(data)
+            for data in self.Extractor.generator_data():
+                self.Saver.data_recorder(data)
             log_success('All data is recorded')
 
     def _check_db_partitions(self) -> bool:
@@ -78,7 +87,7 @@ class PostgresExtrator():
                 self.cursor.execute('''
                     SELECT
                         created_at,
-                        created_id,
+                        convert_from(created_id, 'utf8') as created_id,
                         device_id,
                         object_id,
                         mes_id,
@@ -89,9 +98,9 @@ class PostgresExtrator():
                         event_value,
                         event_data
                     FROM device.messages
-                    WHERE created_id > $1
+                    WHERE created_id > %s::bytea
                     ORDER BY created_id
-                    LIMIT $2;''', self.check_id, self.chunk)
+                    LIMIT %s::int4;''', (self.check_id, self.chunk))
             except Exception as err:
                 log_error(err)
                 raise SystemExit
@@ -105,7 +114,7 @@ class PostgresExtrator():
         '''Возвращает список с уникальным object_id'''
         self.cursor.execute('''
             SELECT DISTINCT ON (object_id)
-            created_id,
+            convert_from(created_id, 'utf8') as created_id,
             device_id,
             object_id,
             mes_id,
@@ -117,7 +126,9 @@ class PostgresExtrator():
             event_data
             FROM device.messages;'''
             )
-        return self.cursor.fetchall()
+        data = self.cursor.fetchall()
+        return data
+
 
 
 class PostgresSaver():
@@ -139,14 +150,24 @@ class PostgresSaver():
             FROM information_schema.tables
             WHERE table_name LIKE 'message\_%';'''
             )
-        return self.cursor.fetchone()
+        return self.cursor.fetchone()[0]
 
     def make_partition(self, data):
         '''Вызывает процедуру, которая разбивает таблицу на секции'''
-        self.cursor.execute("CALL device.check_section($1, $2);", json.dumps(data), None)
+        for row in data:
+            self.make_section(dict(row))
         self.clean_data()
         self.pg_conn.commit()
         log_success('Sections have been created in the table device.messages')
+
+    def make_section(self, row):
+        try:
+            serializible_data = json.dumps(row, cls=JsonEncoder)
+            self.cursor.execute("call device.check_section(%s::jsonb, %s::bigint)", (serializible_data, 0))
+        except Exception as err:
+            log_error(err)
+            raise SystemExit
+
 
     def clean_data(self):
         '''Очищает таблицу device.messages вместе с секциями'''
@@ -155,6 +176,7 @@ class PostgresSaver():
     
     def data_recorder(self, data: list):
         for slice_data in self._slicer(data):
+            serialize_rows = self.serialize_for_insert(slice_data)
             try:
                 execute_values(self.cursor,
                     '''INSERT INTO device.messages (
@@ -170,11 +192,33 @@ class PostgresSaver():
                         event_value,
                         event_data
                     )
-                    VALUES %s''', slice_data)
+                    VALUES %s''', serialize_rows)
             except Exception as err:
                 log_error(err)
                 raise SystemExit
             self.pg_conn.commit()
+
+    def serialize_for_insert(self, data):
+        res_arr = []
+        columns = ('created_at',
+                'created_id',
+                'device_id',
+                'object_id',
+                'mes_id',
+                'mes_time',
+                'mes_code',
+                'mes_status',
+                'mes_data',
+                'event_value',
+                'event_data')
+        for row in data:
+            item_dict = dict(row)
+            row_set = (item_dict[column] for column in columns)
+            res_row = self.cursor.mogrify("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", json.dumps(row_set, cls=JsonEncoder)).decode()
+            res_arr.append(res_row)
+        return res_arr
+
+
 
     def chek_created_id(self):
         self.cursor.execute('''
@@ -183,7 +227,8 @@ class PostgresSaver():
             ORDER BY m.created_id DESC
             LIMIT 1;'''
             )
-        return self.cursor.fetchone()
+        res = self.cursor.fetchone()
+        return res if res != None else '0'.encode()
 
 class PgConfig:
     def __init__(self, dbname: str, user: str, password: str, host: str, port: str):
@@ -198,5 +243,7 @@ class PgConfig:
 
 
 if __name__ == '__main__':
-    Postgres(ext_pg_conf=PgConfig('DBNAME_1', 'USER_1', 'PASSWORD_1', 'HOST_1', 'PORT_1')
+    load_save = Postgres(ext_pg_conf=PgConfig('DBNAME_1', 'USER_1', 'PASSWORD_1', 'HOST_1', 'PORT_1')
     , save_pg_conf=PgConfig('DBNAME_2', 'USER_2', 'PASSWORD_2', 'HOST_2', 'PORT_2'))
+    load_save()
+    

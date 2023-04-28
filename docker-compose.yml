@@ -12,4 +12,4 @@ services:
       PGDATA: /data
       POSTGRES_INITDB_ARGS: "-A md5"
     ports:
-      - "54320:5432"
+      - "54321:5432"
