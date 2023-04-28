@@ -3,7 +3,7 @@ import json
 import psycopg2
 from dotenv import load_dotenv
 from psycopg2.extensions import connection as _connection
-from psycopg2.extras import DictCursor
+from psycopg2.extras import DictCursor, execute_values
 from contextlib import contextmanager
 from log_pack import log_error, log_success
 
@@ -29,7 +29,7 @@ class Postgres(pg_context):
     Saver: PostgresSaver
     Extractor: PostgresExtrator
 
-    def __init__(self, ext_pg_conf: PgConfig, save_pg_conf: PgConfig, chunk_extract=500, chunk_save=20):
+    def __init__(self, ext_pg_conf: PgConfig, save_pg_conf: PgConfig, chunk_extract=500, chunk_save=100):
         self.ext_pg_conf = ext_pg_conf
         self.save_pg_conf = save_pg_conf
         self.chunk_extract = chunk_extract
@@ -42,10 +42,13 @@ class Postgres(pg_context):
             self.Extractor = PostgresExtrator(ext_conn, self.chunk_extract)
             # Запуск блока проверки
             if not self._check_db_partitions() and self.count_partition == 0:
+                self.Saver.make_partition(self.data_for_partition)
+                if self.Saver.get_counter_partiton() == 0:
+                    # если после этих действий секции не создались то вызывается исключение
+                    log_error("sections were not created, check the script operation")
+                    raise SystemExit
 
-
-
-            self.Extractor.check_id = Saver.chek_created_id()
+            self.Extractor.check_id = self.Saver.chek_created_id()
             for data in Extractor.generator():
                 Saver.data_recorder(data)
             log_success('All data is recorded')
@@ -55,10 +58,6 @@ class Postgres(pg_context):
         self.data_for_partition = self.Extractor.get_distinct_object()
         self.counter_partiton = self.Saver.get_counter_partiton()
         return len(self.data_for_partition) == self.counter_partiton
-
-
-
-
 
 
 class PostgresExtrator():
@@ -71,7 +70,33 @@ class PostgresExtrator():
         self.chunk = chunk
 
     def generator_data(self):
-        pass
+        while True:
+            try:
+                self.cursor.execute('''
+                    SELECT
+                        created_at,
+                        created_id,
+                        device_id,
+                        object_id,
+                        mes_id,
+                        mes_time,
+                        mes_code,
+                        mes_status,
+                        mes_data,
+                        event_value,
+                        event_data
+                    FROM device.messages
+                    WHERE created_id > $1
+                    ORDER BY created_id
+                    LIMIT $2;''', self.check_id, self.chunk)
+            except Exception as err:
+                log_error(err)
+                raise SystemExit
+            data = self.cursor.fetchall()
+            if not data:
+                break
+            yield data
+            self.check_id = data[-1].created_id
 
     def get_distinct_object(self):
         '''Возвращает список с уникальным object_id'''
@@ -99,6 +124,11 @@ class PostgresSaver():
         self.cursor = pg_conn.cursor()
         self.chunk = chunk
 
+    def _slicer(self, data: list):
+        '''Нарезает список данных на чанки для дальнейшей обработки'''
+        for item in range(0, len(data), self.chunk):
+            yield data[item :item  + self.chunk]
+
     def get_counter_partiton(self):
         '''Возвращает количество секций в таблице'''
         self.cursor.execute('''
@@ -120,9 +150,28 @@ class PostgresSaver():
         self.cursor.execute("TRUNCATE TABLE device.messages")
         log_success('Table device.messages is cleared')
     
-
-    def data_recorder(self, data):
-        pass
+    def data_recorder(self, data: list):
+        for slice_data in self._slicer(data):
+            try:
+                execute_values(self.cursor,
+                    '''INSERT INTO device.messages (
+                        created_at,
+                        created_id,
+                        device_id,
+                        object_id,
+                        mes_id,
+                        mes_time,
+                        mes_code,
+                        mes_status,
+                        mes_data,
+                        event_value,
+                        event_data
+                    )
+                    VALUES %s''', slice_data)
+            except Exception as err:
+                log_error(err)
+                raise SystemExit
+            self.pg_conn.commit()
 
     def chek_created_id(self):
         self.cursor.execute('''
