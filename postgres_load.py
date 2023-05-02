@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import datetime
 import psycopg2
 from dotenv import load_dotenv
@@ -35,14 +36,14 @@ class pg_context:
 
 class Postgres(pg_context):
     count_partition: int
-    # Saver: PostgresSaver
-    # Extractor: PostgresExtrator
 
-    def __init__(self, ext_pg_conf, save_pg_conf, chunk_extract=2000, chunk_save=500):
+    def __init__(self, ext_pg_conf, save_pg_conf, chunk_extract=200000, chunk_save=20000):
         self.ext_pg_conf = ext_pg_conf
         self.save_pg_conf = save_pg_conf
         self.chunk_extract = chunk_extract
         self.chunk_save = chunk_save
+        self.start = 0
+        self.end = 0
 
     def _worker(self):
         '''Управляющий блок запускающий логику'''
@@ -58,8 +59,24 @@ class Postgres(pg_context):
                     raise SystemExit
 
             self.Extractor.check_id = self.Saver.chek_created_id()
+
+            self.start = time.perf_counter()
+            rows_DB_1 = self.Extractor.get_count_rows()
+            rows_DB_2 = self.Saver.get_count_rows()
+            if rows_DB_2 != 0:
+                counter = rows_DB_2
+                log_success(f"Выполнено: {round(rows_DB_2 / rows_DB_1 * 100, 2)} %")
+            else:
+                counter = 0
             for data in self.Extractor.generator_data():
-                self.Saver.data_recorder(data)
+                count_rows = self.Saver.data_recorder(data)
+                counter += count_rows
+                percent = round(counter / rows_DB_1 * 100, 2)
+                log_success(f"Выполнено: {percent} %")
+                self.end = time.perf_counter()
+                time_worker = (self.end - self.start) * ((rows_DB_1 - counter) / count_rows) / 60
+                log_success(f"Примерное время выполнения скрипта: {round(time_worker, 2)} минут")
+                self.start = self.end
             log_success('All data is recorded')
 
     def _check_db_partitions(self) -> bool:
@@ -74,12 +91,12 @@ class Postgres(pg_context):
 
 class PostgresExtrator():
     '''Класс для взаимодействия с БД откуда считываются данные'''
-    check_id: str
 
     def __init__(self, pg_conn, chunk: int):
         self.pg_conn = pg_conn
         self.cursor = pg_conn.cursor()
         self.chunk = chunk
+        self.check_id = '0'.encode()
 
     def generator_data(self):
         while True:
@@ -108,7 +125,8 @@ class PostgresExtrator():
             if not data:
                 break
             yield data
-            self.check_id = data[-1]['created_id']
+            self.check_id = data[-1]['created_id'].encode()
+
 
     def get_distinct_object(self):
         '''Возвращает список с уникальным object_id'''
@@ -127,6 +145,11 @@ class PostgresExtrator():
             FROM device.messages;'''
             )
         data = self.cursor.fetchall()
+        return data
+
+    def get_count_rows(self):
+        self.cursor.execute('select COUNT(id) from device.messages')
+        data = int(self.cursor.fetchone()[0])
         return data
 
 
@@ -161,6 +184,7 @@ class PostgresSaver():
         log_success('Sections have been created in the table device.messages')
 
     def make_section(self, row):
+        '''Создает секции'''
         try:
             serializible_data = json.dumps(row, cls=JsonEncoder)
             self.cursor.execute("call device.check_section(%s::jsonb, %s::bigint)", (serializible_data, 0))
@@ -168,13 +192,14 @@ class PostgresSaver():
             log_error(err)
             raise SystemExit
 
-
     def clean_data(self):
         '''Очищает таблицу device.messages вместе с секциями'''
         self.cursor.execute("TRUNCATE TABLE device.messages")
         log_success('Table device.messages is cleared')
     
     def data_recorder(self, data: list):
+        '''Записывает данные чанками'''
+        count_rows = 0
         for slice_data in self._slicer(data):
             serialize_rows = self.serialize_for_insert(slice_data)
             try:
@@ -197,7 +222,9 @@ class PostgresSaver():
                 log_error(err)
                 raise SystemExit
             self.pg_conn.commit()
+            count_rows += len(serialize_rows)
             log_success(f'{self.chunk} rows are written to the table')
+        return count_rows
 
     def serialize_for_insert(self, data):
         res_arr = []
@@ -226,8 +253,6 @@ class PostgresSaver():
             res_arr.append(row_set)
         return res_arr
 
-
-
     def chek_created_id(self):
         self.cursor.execute('''
             SELECT convert_from(created_id, 'utf8') as created_id
@@ -236,7 +261,12 @@ class PostgresSaver():
             LIMIT 1;'''
             )
         res = self.cursor.fetchone()
-        return res[0].encode() if res != None else '0'.encode()
+        return res[0].replace('"', '').encode() if res != None else '0'.encode()
+
+    def get_count_rows(self):
+        self.cursor.execute('select COUNT(id) from device.messages')
+        data = int(self.cursor.fetchone()[0])
+        return data
 
 class PgConfig:
     def __init__(self, dbname: str, user: str, password: str, host: str, port: str):
