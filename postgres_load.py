@@ -38,7 +38,7 @@ class Postgres(pg_context):
     # Saver: PostgresSaver
     # Extractor: PostgresExtrator
 
-    def __init__(self, ext_pg_conf, save_pg_conf, chunk_extract=500, chunk_save=100):
+    def __init__(self, ext_pg_conf, save_pg_conf, chunk_extract=2000, chunk_save=500):
         self.ext_pg_conf = ext_pg_conf
         self.save_pg_conf = save_pg_conf
         self.chunk_extract = chunk_extract
@@ -108,7 +108,7 @@ class PostgresExtrator():
             if not data:
                 break
             yield data
-            self.check_id = data[-1].created_id
+            self.check_id = data[-1]['created_id']
 
     def get_distinct_object(self):
         '''Возвращает список с уникальным object_id'''
@@ -197,10 +197,12 @@ class PostgresSaver():
                 log_error(err)
                 raise SystemExit
             self.pg_conn.commit()
+            log_success(f'{self.chunk} rows are written to the table')
 
     def serialize_for_insert(self, data):
         res_arr = []
-        columns = ('created_at',
+        columns = (
+                'created_at',
                 'created_id',
                 'device_id',
                 'object_id',
@@ -212,23 +214,29 @@ class PostgresSaver():
                 'event_value',
                 'event_data')
         for row in data:
-            item_dict = dict(row)
-            row_set = (item_dict[column] for column in columns)
-            res_row = self.cursor.mogrify("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", json.dumps(row_set, cls=JsonEncoder)).decode()
-            res_arr.append(res_row)
+            try:
+                item_dict = dict(row)
+                row_set = [json.dumps(item_dict[column], cls=JsonEncoder) for column in columns]
+                # row_set = [item_dict[column] for column in columns]
+                # row_json = json.dumps(row_set, cls=JsonEncoder).split(',')
+                # res_row = self.cursor.mogrify("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", row_set).decode('utf-8')
+            except Exception as err:
+                log_error(err)
+                raise SystemExit
+            res_arr.append(row_set)
         return res_arr
 
 
 
     def chek_created_id(self):
         self.cursor.execute('''
-            SELECT m.created_id
-            FROM device.messages m
-            ORDER BY m.created_id DESC
+            SELECT convert_from(created_id, 'utf8') as created_id
+            FROM device.messages
+            ORDER BY created_id DESC
             LIMIT 1;'''
             )
         res = self.cursor.fetchone()
-        return res if res != None else '0'.encode()
+        return res[0].encode() if res != None else '0'.encode()
 
 class PgConfig:
     def __init__(self, dbname: str, user: str, password: str, host: str, port: str):
