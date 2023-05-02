@@ -223,7 +223,7 @@ class PostgresSaver():
                 raise SystemExit
             self.pg_conn.commit()
             count_rows += len(serialize_rows)
-            log_success(f'{self.chunk} rows are written to the table')
+            log_success(f'{count_rows} rows are written to the table')
         return count_rows
 
     def serialize_for_insert(self, data):
