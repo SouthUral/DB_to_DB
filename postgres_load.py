@@ -102,19 +102,21 @@ class PostgresExtrator():
         while True:
             try:
                 self.cursor.execute('''
-                    SELECT
-                        created_at,
+                    SELECT 
+                        dda.received_time as created_at,
                         convert_from(created_id, 'utf8') as created_id,
                         device_id,
                         object_id,
                         mes_id,
                         mes_time,
-                        mes_code,
-                        mes_status,
-                        mes_data,
-                        event_value,
+                        co.code as mes_code,
+                        (dda."data" -> 'status_info') mes_status,
+                        dda."data" as mes_data,
+                        co.const_value as event_value,
                         event_data
-                    FROM device.messages
+                    FROM
+                        sh_ilo.data_device_archive dda 
+                        JOIN sh_data.v_constants co on co.code = dda.event and co.class in ('DBMSGTYPE', 'DBLOGICTYPE')
                     WHERE created_id > %s::bytea
                     ORDER BY created_id
                     LIMIT %s::int4;''', (self.check_id, self.chunk))
@@ -132,23 +134,26 @@ class PostgresExtrator():
         '''Возвращает список с уникальным object_id'''
         self.cursor.execute('''
             SELECT DISTINCT ON (object_id)
-            convert_from(created_id, 'utf8') as created_id,
-            device_id,
-            object_id,
-            mes_id,
-            mes_time,
-            mes_code,
-            mes_status,
-            mes_data,
-            event_value,
-            event_data
-            FROM device.messages;'''
+                dda.received_time as created_at,
+                convert_from(created_id, 'utf8') as created_id,
+                device_id,
+                object_id,
+                mes_id,
+                mes_time,
+                co.code as mes_code,
+                (dda."data" -> 'status_info') mes_status,
+                dda."data" as mes_data,
+                co.const_value as event_value,
+                event_data
+            FROM
+                sh_ilo.data_device_archive dda 
+                JOIN sh_data.v_constants co on co.code = dda.event and co.class in ('DBMSGTYPE', 'DBLOGICTYPE')'''
             )
         data = self.cursor.fetchall()
         return data
 
     def get_count_rows(self):
-        self.cursor.execute('select COUNT(id) from device.messages')
+        self.cursor.execute('select COUNT(id) from sh_ilo.data_device_archive')
         data = int(self.cursor.fetchone()[0])
         return data
 

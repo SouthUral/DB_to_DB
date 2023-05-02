@@ -27,7 +27,7 @@ CREATE PROCEDURE device.set_messages(IN p_message jsonb, IN p_offset bigint)
             (p_message -> 'event_info' ->> 'code') :: integer,
             (p_message -> 'data' -> 'status_info'),
             (p_message -> 'data'),
-            (p_message -> 'event'),
+            (p_message -> 'event_info' ->> 'const'),
             (p_message -> 'event_data')
         );
     end;
