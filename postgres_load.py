@@ -4,6 +4,7 @@ import time
 import datetime
 import psycopg2
 from dotenv import load_dotenv
+from statistics import mean
 from psycopg2.extensions import connection as _connection
 from psycopg2.extras import DictCursor, execute_values
 from contextlib import contextmanager
@@ -37,7 +38,7 @@ class pg_context:
 class Postgres(pg_context):
     count_partition: int
 
-    def __init__(self, ext_pg_conf, save_pg_conf, chunk_extract=200000, chunk_save=20000):
+    def __init__(self, ext_pg_conf, save_pg_conf, chunk_extract=10000, chunk_save=1000):
         self.ext_pg_conf = ext_pg_conf
         self.save_pg_conf = save_pg_conf
         self.chunk_extract = chunk_extract
@@ -59,7 +60,7 @@ class Postgres(pg_context):
                     raise SystemExit
 
             self.Extractor.check_id = self.Saver.chek_created_id()
-
+            timer = []
             self.start = time.perf_counter()
             rows_DB_1 = self.Extractor.get_count_rows()
             rows_DB_2 = self.Saver.get_count_rows()
@@ -75,7 +76,8 @@ class Postgres(pg_context):
                 log_success(f"Выполнено: {percent} %")
                 self.end = time.perf_counter()
                 time_worker = (self.end - self.start) * ((rows_DB_1 - counter) / count_rows) / 60
-                log_success(f"Примерное время выполнения скрипта: {round(time_worker, 2)} минут")
+                timer.append(time_worker)
+                log_success(f"Примерное время выполнения скрипта: {round(mean(timer), 2)} минут")
                 self.start = self.end
             log_success('All data is recorded')
 
@@ -96,13 +98,14 @@ class PostgresExtrator():
         self.pg_conn = pg_conn
         self.cursor = pg_conn.cursor()
         self.chunk = chunk
-        self.check_id = '0'.encode()
+        self.check_id = 0
 
     def generator_data(self):
         while True:
             try:
                 self.cursor.execute('''
                     SELECT 
+                        dda.id,
                         dda.received_time as created_at,
                         convert_from(created_id, 'utf8') as created_id,
                         device_id,
@@ -117,8 +120,8 @@ class PostgresExtrator():
                     FROM
                         sh_ilo.data_device_archive dda 
                         JOIN sh_data.v_constants co on co.code = dda.event and co.class in ('DBMSGTYPE', 'DBLOGICTYPE')
-                    WHERE created_id > %s::bytea
-                    ORDER BY created_id
+                    WHERE dda.id > %s::int8
+                    ORDER BY dda.id
                     LIMIT %s::int4;''', (self.check_id, self.chunk))
             except Exception as err:
                 log_error(err)
@@ -127,28 +130,16 @@ class PostgresExtrator():
             if not data:
                 break
             yield data
-            self.check_id = data[-1]['created_id'].encode()
-
+            self.check_id = int(data[-1]['id'])
+            print(self.check_id)
 
     def get_distinct_object(self):
         '''Возвращает список с уникальным object_id'''
         self.cursor.execute('''
-            SELECT DISTINCT ON (object_id)
-                dda.received_time as created_at,
-                convert_from(created_id, 'utf8') as created_id,
-                device_id,
-                object_id,
-                mes_id,
-                mes_time,
-                co.code as mes_code,
-                (dda."data" -> 'status_info') mes_status,
-                dda."data" as mes_data,
-                co.const_value as event_value,
-                event_data
+            SELECT DISTINCT ON (object_id) 
+                object_id
             FROM
-                sh_ilo.data_device_archive dda 
-                JOIN sh_data.v_constants co on co.code = dda.event and co.class in ('DBMSGTYPE', 'DBLOGICTYPE')'''
-            )
+                sh_ilo.data_device_archive''')
         data = self.cursor.fetchall()
         return data
 
@@ -183,24 +174,25 @@ class PostgresSaver():
     def make_partition(self, data):
         '''Вызывает процедуру, которая разбивает таблицу на секции'''
         for row in data:
-            self.make_section(dict(row))
-        self.clean_data()
+            self.make_section(dict(row)['object_id'])
         self.pg_conn.commit()
         log_success('Sections have been created in the table device.messages')
 
-    def make_section(self, row):
+    def make_section(self, number_section):
         '''Создает секции'''
         try:
-            serializible_data = json.dumps(row, cls=JsonEncoder)
-            self.cursor.execute("call device.check_section(%s::jsonb, %s::bigint)", (serializible_data, 0))
+            name_section = f"device.message_{number_section}"
+            query = 'CREATE TABLE {} PARTITION OF device.messages FOR VALUES IN ({})'.format(name_section, number_section)
+            self.cursor.execute(query)
+            # self.cursor.execute('CREATE TABLE %s PARTITION OF device.messages FOR VALUES IN (%s)', (name_section, number_section))
         except Exception as err:
             log_error(err)
             raise SystemExit
 
-    def clean_data(self):
-        '''Очищает таблицу device.messages вместе с секциями'''
-        self.cursor.execute("TRUNCATE TABLE device.messages")
-        log_success('Table device.messages is cleared')
+    # def clean_data(self):
+    #     '''Очищает таблицу device.messages вместе с секциями'''
+    #     self.cursor.execute("TRUNCATE TABLE device.messages")
+    #     log_success('Table device.messages is cleared')
     
     def data_recorder(self, data: list):
         '''Записывает данные чанками'''
@@ -210,6 +202,7 @@ class PostgresSaver():
             try:
                 execute_values(self.cursor,
                     '''INSERT INTO device.messages (
+                        offset_msg,
                         created_at,
                         created_id,
                         device_id,
@@ -234,6 +227,7 @@ class PostgresSaver():
     def serialize_for_insert(self, data):
         res_arr = []
         columns = (
+                'id',
                 'created_at',
                 'created_id',
                 'device_id',
@@ -260,13 +254,14 @@ class PostgresSaver():
 
     def chek_created_id(self):
         self.cursor.execute('''
-            SELECT convert_from(created_id, 'utf8') as created_id
+            SELECT offset_msg
             FROM device.messages
-            ORDER BY created_id DESC
+            ORDER BY offset_msg DESC
             LIMIT 1;'''
             )
         res = self.cursor.fetchone()
-        return res[0].replace('"', '').encode() if res != None else '0'.encode()
+        r_1 = int(res[0])
+        return r_1 if res != None else 0
 
     def get_count_rows(self):
         self.cursor.execute('select COUNT(id) from device.messages')
