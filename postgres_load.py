@@ -243,9 +243,6 @@ class PostgresSaver():
             try:
                 item_dict = dict(row)
                 row_set = [json.dumps(item_dict[column], cls=JsonEncoder) for column in columns]
-                # row_set = [item_dict[column] for column in columns]
-                # row_json = json.dumps(row_set, cls=JsonEncoder).split(',')
-                # res_row = self.cursor.mogrify("(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", row_set).decode('utf-8')
             except Exception as err:
                 log_error(err)
                 raise SystemExit
@@ -260,13 +257,12 @@ class PostgresSaver():
             LIMIT 1;'''
             )
         res = self.cursor.fetchone()
-        r_1 = int(res[0])
-        return r_1 if res != None else 0
+        return 0 if not res else int(res)
 
     def get_count_rows(self):
         self.cursor.execute('select COUNT(id) from device.messages')
-        data = int(self.cursor.fetchone()[0])
-        return data
+        data = self.cursor.fetchone()[0]
+        return 0 if not data else int(data)
 
 class PgConfig:
     def __init__(self, dbname: str, user: str, password: str, host: str, port: str):
